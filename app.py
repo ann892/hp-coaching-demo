@@ -87,7 +87,7 @@ def get_secret(key, default=""):
 
 
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
-CALENDLY_URL = get_secret("CALENDLY_URL", "https://calendly.com/helloparalegal/discovery")
+CALENDLY_URL = get_secret("CALENDLY_URL", "https://calendly.com/helloparalegal/30min")
 RESEND_API_KEY = get_secret("RESEND_API_KEY")
 LEAD_NOTIFY_EMAIL = get_secret("LEAD_NOTIFY_EMAIL", "ann@gavelspeaks.com")
 ADMIN_PASSWORD = get_secret("ADMIN_PASSWORD", "")

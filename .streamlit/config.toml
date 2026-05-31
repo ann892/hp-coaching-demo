@@ -7,7 +7,6 @@ font = "serif"
 
 [server]
 headless = true
-enableCORS = false
 
 [browser]
 gatherUsageStats = false
