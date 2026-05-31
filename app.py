@@ -235,15 +235,69 @@ def is_valid_email(email: str) -> bool:
 
 
 # ============================================================
-# CLAUDE ANALYSIS
+# CLAUDE — REDACTION + ANALYSIS
 # ============================================================
 
+REDACTION_SYSTEM_PROMPT = """You are a privacy-preserving redactor for lawyer-client discovery call transcripts.
+
+Your job: return a redacted version of the transcript that preserves the SHAPE of the conversation (every line of dialogue, every speaker turn, every question, every answer) but removes ALL identifying details about the client, the matter, and any third parties.
+
+REPLACE these with consistent placeholders:
+- Personal names (clients, opposing parties, judges, attorneys mentioned) → [CLIENT_1], [CLIENT_2], [OPPOSING_PARTY_1], [JUDGE_1], [ATTORNEY_1] (use numbered placeholders so the reader can still track who is who)
+- Law firm names, company names, organization names → [FIRM_1], [COMPANY_1], [ORG_1]
+- Case numbers, docket numbers, file numbers → [CASE_NUMBER]
+- Phone numbers → [PHONE]
+- Email addresses → [EMAIL]
+- Physical addresses, street names, building names → [ADDRESS]
+- Specific dollar amounts over $100 → [AMOUNT]  (but keep ranges like "five figures" or "around $X-range" as-is)
+- Specific dates (month + day + year) → [DATE]  (but keep relative time like "next Tuesday", "last month", "in Q3" as-is)
+- Social Security Numbers, EINs, bank account numbers → [ID_NUMBER]
+- Specific addresses of properties, businesses, courthouses → [LOCATION]
+
+KEEP these unchanged:
+- All dialogue structure, speaker labels, timestamps
+- Practice area terms ("bankruptcy", "M&A", "estate planning", "personal injury")
+- Generic legal procedure references ("the deposition", "the motion", "discovery", "trial")
+- Generic relationship words ("my husband", "the seller", "the landlord")
+- Emotional content, tone, pauses, "um"s — everything that affects how the call sounds
+- Dollar ranges, fee discussions, scope discussions — but with specific amounts redacted
+
+CRITICAL:
+- Return ONLY the redacted transcript text. No preamble, no explanation, no markdown headers.
+- Be aggressive on identifiers but conservative on context. The coaching analysis depends on hearing the SHAPE of the conversation — what was asked, how it was answered, where the lawyer slipped.
+- If unsure whether something is identifying, redact it.
+"""
+
+
+def redact_transcript(transcript: str) -> str:
+    """Run a fast Haiku pass to scrub PII before sending to the analysis model."""
+    if not ANTHROPIC_API_KEY:
+        return "❌ Configuration error: ANTHROPIC_API_KEY is not set."
+
+    if len(transcript) > MAX_TRANSCRIPT_CHARS:
+        transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n\n[TRANSCRIPT TRUNCATED]"
+
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=8000,
+            system=REDACTION_SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Redact this transcript per the rules above. Return ONLY the redacted text.\n\n---\n\n{transcript}",
+            }],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        return f"❌ Redaction failed: {e}"
+
+
 def analyze_transcript(transcript: str) -> str:
-    """Run the transcript through Claude with the coaching system prompt."""
+    """Run the (redacted) transcript through Claude with the coaching system prompt."""
     if not ANTHROPIC_API_KEY:
         return "❌ Configuration error: ANTHROPIC_API_KEY is not set. Contact ann@gavelspeaks.com."
 
-    # Truncate if too long
     if len(transcript) > MAX_TRANSCRIPT_CHARS:
         transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n\n[TRANSCRIPT TRUNCATED]"
 
@@ -255,7 +309,7 @@ def analyze_transcript(transcript: str) -> str:
             system=COACHING_SYSTEM_PROMPT,
             messages=[{
                 "role": "user",
-                "content": f"Here is the call transcript. Analyze it per the framework above.\n\n---\n\n{transcript}",
+                "content": f"Here is the call transcript (client identifiers have been replaced with placeholders for privacy). Analyze it per the framework above.\n\n---\n\n{transcript}",
             }],
         )
         return response.content[0].text
@@ -308,6 +362,8 @@ This tool grades your last call against a closer's framework:
 - **The 4-phase structure** of a tight discovery call
 - **Specific moments** where you nailed it — and where you slipped, with the better script
 - **What to send next** — a follow-up email drafted in your voice
+
+🔒 **Privacy:** You don't need to redact anything before pasting. The tool auto-replaces client names, firm names, case numbers, and dollar amounts with placeholders before the analysis runs — and shows you the redacted version so you can edit anything we missed.
 """
 )
 
@@ -330,8 +386,8 @@ if not st.session_state.analysis_unlocked:
         with col2:
             firm = st.text_input("Firm name", placeholder="Smith & Associates")
         st.caption(
-            "We'll email you the analysis as a PDF and follow up with one short message about how we'd "
-            "build this as an always-on agent for your firm. No newsletter. No spam."
+            "We'll follow up with one short message about how we'd build this as an always-on "
+            "agent for your firm. No newsletter. No spam."
         )
         submitted = st.form_submit_button("Continue →")
         if submitted:
@@ -345,36 +401,102 @@ if not st.session_state.analysis_unlocked:
 
 if st.session_state.analysis_unlocked:
     st.success(f"✓ Unlocked for **{st.session_state.lead_email}**")
-    st.subheader("Paste your transcript")
-    st.markdown(
-        '<p class="small-print">'
-        "⚠️ <strong>Redact client identifying details before pasting</strong> "
-        "(names, case numbers, specific facts that could identify the matter). "
-        "Your transcript is sent to Anthropic's Claude API for analysis and is not stored on our servers."
-        "</p>",
-        unsafe_allow_html=True,
-    )
-    transcript = st.text_area(
-        "Transcript",
-        height=300,
-        placeholder="Speaker A 00:00:01\nThanks for hopping on. Tell me a little about what's going on...\n\nSpeaker B 00:00:15\nSure, so we've been dealing with...",
-        label_visibility="collapsed",
-    )
 
-    if st.button("Analyze my call", type="primary", use_container_width=True):
-        if len(transcript.strip()) < 200:
-            st.error("Transcript looks too short. Paste at least a few minutes of dialogue.")
-        elif not rate_limit_check(st.session_state.lead_email):
-            st.warning(
-                "You've already run one analysis in the last 24 hours. "
-                "Want unlimited analyses for your firm? "
-                f"[Book a call →]({CALENDLY_URL})"
+    # Initialize step state
+    if "redacted_transcript" not in st.session_state:
+        st.session_state.redacted_transcript = ""
+    if "raw_transcript" not in st.session_state:
+        st.session_state.raw_transcript = ""
+
+    # ============================================================
+    # STEP 1: Paste raw transcript → run redaction
+    # ============================================================
+    if not st.session_state.redacted_transcript:
+        st.subheader("Step 1: Paste your transcript")
+        st.markdown(
+            '<p class="small-print">'
+            "🔒 <strong>You don't need to redact anything yourself.</strong> "
+            "When you click <em>Auto-redact</em> below, we run a fast pass that "
+            "replaces client names, firm names, case numbers, phone numbers, addresses, "
+            "and specific dollar amounts with placeholders like [CLIENT_1], [FIRM_1], [CASE_NUMBER]. "
+            "You'll see the redacted version and can edit it before the analysis runs."
+            "<br><br>"
+            "Anthropic (the company behind Claude) does not train on data sent through their API. "
+            "We do not store transcripts on our servers."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        raw_transcript = st.text_area(
+            "Transcript",
+            height=300,
+            placeholder="Speaker A 00:00:01\nThanks for hopping on. Tell me a little about what's going on...\n\nSpeaker B 00:00:15\nSure, so we've been dealing with...",
+            label_visibility="collapsed",
+            value=st.session_state.raw_transcript,
+            key="raw_transcript_input",
+        )
+
+        if st.button("🔒 Auto-redact (10 sec)", type="primary", use_container_width=True):
+            if len(raw_transcript.strip()) < 200:
+                st.error("Transcript looks too short. Paste at least a few minutes of dialogue.")
+            elif not rate_limit_check(st.session_state.lead_email):
+                st.warning(
+                    "You've already run one analysis in the last 24 hours. "
+                    "Want unlimited analyses for your firm? "
+                    f"[Book a call →]({CALENDLY_URL})"
+                )
+            else:
+                st.session_state.raw_transcript = raw_transcript
+                with st.spinner("Redacting client identifiers..."):
+                    redacted = redact_transcript(raw_transcript)
+                if redacted.startswith("❌"):
+                    st.error(redacted)
+                else:
+                    st.session_state.redacted_transcript = redacted
+                    st.rerun()
+
+    # ============================================================
+    # STEP 2: Confirm redacted version → run analysis
+    # ============================================================
+    else:
+        st.subheader("Step 2: Confirm the redacted version")
+        st.markdown(
+            '<p class="small-print">'
+            "✅ Names, firms, case numbers, and other identifiers have been replaced with placeholders. "
+            "<strong>Review below and edit anything we missed</strong> — then click Analyze. "
+            "Only this redacted version is sent to the analysis model."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        edited_transcript = st.text_area(
+            "Redacted transcript (editable)",
+            height=300,
+            value=st.session_state.redacted_transcript,
+            label_visibility="collapsed",
+            key="redacted_editor",
+        )
+
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            analyze_clicked = st.button(
+                "📋 Analyze redacted call (60 sec)",
+                type="primary",
+                use_container_width=True,
             )
-        else:
-            log_lead(st.session_state.lead_email, st.session_state.lead_firm, len(transcript))
+        with col_b:
+            if st.button("← Start over", use_container_width=True):
+                st.session_state.redacted_transcript = ""
+                st.session_state.raw_transcript = ""
+                st.rerun()
+
+        if analyze_clicked:
+            log_lead(
+                st.session_state.lead_email,
+                st.session_state.lead_firm,
+                len(edited_transcript),
+            )
             mark_used(st.session_state.lead_email)
             with st.spinner("Reading the transcript... (60 seconds)"):
-                result = analyze_transcript(transcript)
+                result = analyze_transcript(edited_transcript)
             st.markdown("---")
             st.markdown("## Your Post-Mortem")
             st.markdown(result)
