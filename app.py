@@ -214,20 +214,39 @@ def log_lead(email: str, firm: str, transcript_chars: int):
             pass  # Don't block analysis if email fails
 
 
+def has_used_demo(email: str) -> bool:
+    """Check leads.csv to see if this email has already used the demo."""
+    if not LEADS_CSV.exists():
+        return False
+    try:
+        with open(LEADS_CSV, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            target = email.lower().strip()
+            for row in reader:
+                if (row.get("email") or "").lower().strip() == target:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def rate_limit_check(email: str) -> bool:
-    """Returns True if user is within rate limit (allowed), False if rate-limited."""
-    if "rate_limits" not in st.session_state:
-        st.session_state.rate_limits = {}
-    last = st.session_state.rate_limits.get(email.lower())
-    if last and (datetime.utcnow() - last) < timedelta(hours=RATE_LIMIT_HOURS):
+    """Returns True if user is allowed (first time), False if already used demo."""
+    # In-memory check (same session) — defends against rapid double-click
+    if "used_emails" in st.session_state and email.lower() in st.session_state.used_emails:
+        return False
+    # Persistent check (across sessions) — defends against email reuse
+    if has_used_demo(email):
         return False
     return True
 
 
 def mark_used(email: str):
-    if "rate_limits" not in st.session_state:
-        st.session_state.rate_limits = {}
-    st.session_state.rate_limits[email.lower()] = datetime.utcnow()
+    """Mark this email as having used the demo in-session.
+    Persistent record is created by log_lead() writing to leads.csv."""
+    if "used_emails" not in st.session_state:
+        st.session_state.used_emails = set()
+    st.session_state.used_emails.add(email.lower())
 
 
 def is_valid_email(email: str) -> bool:
@@ -393,6 +412,14 @@ if not st.session_state.analysis_unlocked:
         if submitted:
             if not is_valid_email(email):
                 st.error("Please enter a valid email address.")
+            elif has_used_demo(email):
+                st.warning(
+                    f"**This email has already used the free demo.** "
+                    f"This tool is one-shot per lawyer so we can keep it free. "
+                    f"Want to coach every call your firm runs going forward? "
+                    f"We build the always-on version for solo and small law firms in 3 weeks. "
+                    f"[Book a 30-min discovery call →]({CALENDLY_URL})"
+                )
             else:
                 st.session_state.lead_email = email
                 st.session_state.lead_firm = firm
@@ -440,9 +467,10 @@ if st.session_state.analysis_unlocked:
                 st.error("Transcript looks too short. Paste at least a few minutes of dialogue.")
             elif not rate_limit_check(st.session_state.lead_email):
                 st.warning(
-                    "You've already run one analysis in the last 24 hours. "
-                    "Want unlimited analyses for your firm? "
-                    f"[Book a call →]({CALENDLY_URL})"
+                    "**You've already used your free analysis.** This demo is one-shot per lawyer "
+                    "so we can keep it free. Want to coach every call your firm runs going forward? "
+                    f"We build the always-on version for solo and small law firms in 3 weeks. "
+                    f"[Book a 30-min discovery call →]({CALENDLY_URL})"
                 )
             else:
                 st.session_state.raw_transcript = raw_transcript
