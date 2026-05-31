@@ -398,8 +398,7 @@ st.markdown("---")
 st.markdown(
     '<p class="small-print">'
     "Built by <a href='https://helloparalegal.com'>Hello Paralegal</a> · "
-    "AI workflows for solo and small law firms · "
-    "Operated by Gavel Speaks Inc."
+    "AI workflows for solo and small law firms"
     "</p>",
     unsafe_allow_html=True,
 )
